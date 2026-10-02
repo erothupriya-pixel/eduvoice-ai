@@ -179,9 +179,17 @@ SIMPLE_JWT = {
 }
 
 # CORS Configuration
+# CORS Configuration
+
 CORS_ALLOWED_ORIGINS = [
-    origin.strip() for origin in os.getenv('CORS_ALLOWED_ORIGINS', 'http://localhost:5173,http://127.0.0.1:5173').split(',') if origin.strip()
+    origin.strip() for origin in os.getenv(
+        'CORS_ALLOWED_ORIGINS',
+        'https://startling-stardust-d2d0c1.netlify.app,http://localhost:5173,http://127.0.0.1:5173'
+    ).split(',')
+    if origin.strip()
 ]
+
+
 CORS_ALLOW_CREDENTIALS = True
 
 # Google Gemini API Config
