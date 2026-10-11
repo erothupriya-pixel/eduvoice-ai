@@ -23,7 +23,8 @@ import {
   ChevronRight,
   HelpCircle,
   Loader2,
-  MessageSquare
+  MessageSquare,
+  Image as ImageIcon
 } from 'lucide-react';
 
 export default function Documents() {
@@ -40,6 +41,7 @@ export default function Documents() {
 
   // Selected document workspace state
   const [activeDoc, setActiveDoc] = useState(null);
+  const [previewImage, setPreviewImage] = useState(null);
   
   // AI analysis loading/results
   const [summaryLoading, setSummaryLoading] = useState(false);
@@ -69,10 +71,26 @@ export default function Documents() {
   const [isAudioLoading, setIsAudioLoading] = useState(false);
   const [activeAudioSource, setActiveAudioSource] = useState(''); // 'explanation', 'exam_notes', 'quiz'
   const [showDoubtSession, setShowDoubtSession] = useState(false);
+  const [voices, setVoices] = useState([]);
   const currentAudioRef = useRef(null);
+  const currentAudioUrlRef = useRef(null);
+  const currentAudioLangRef = useRef('');
+  const isTTSRequestInProgressRef = useRef(false);
 
   useEffect(() => {
     fetchDocuments();
+
+    const updateVoices = () => {
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        const available = window.speechSynthesis.getVoices();
+        setVoices(available);
+      }
+    };
+    updateVoices();
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.onvoiceschanged = updateVoices;
+    }
+
     return () => {
       handleStopSpeech();
     };
@@ -220,114 +238,142 @@ export default function Documents() {
     handleStopSpeech();
   };
 
+  const prepareTTSText = (rawText, maxChars = 2500) => {
+    if (!rawText) return '';
+    let str = rawText.trim();
+    if (str.length <= maxChars) return str;
+
+    let truncated = str.slice(0, maxChars);
+    const lastBoundary = Math.max(
+      truncated.lastIndexOf('.'),
+      truncated.lastIndexOf('!'),
+      truncated.lastIndexOf('?'),
+      truncated.lastIndexOf('।'),
+      truncated.lastIndexOf('|')
+    );
+
+    if (lastBoundary > 1000) {
+      return truncated.slice(0, lastBoundary + 1).trim();
+    }
+    return truncated.trim();
+  };
+
   const handleStopSpeech = () => {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try { window.speechSynthesis.cancel(); } catch (_) {}
+    }
     if (currentAudioRef.current) {
-      currentAudioRef.current.pause();
+      try { currentAudioRef.current.pause(); } catch (_) {}
       currentAudioRef.current = null;
     }
-    window.speechSynthesis.cancel();
+    if (currentAudioUrlRef.current) {
+      try { URL.revokeObjectURL(currentAudioUrlRef.current); } catch (_) {}
+      currentAudioUrlRef.current = null;
+    }
+    currentAudioLangRef.current = '';
+    isTTSRequestInProgressRef.current = false;
     setIsSpeaking(false);
     setIsPaused(false);
     setIsAudioLoading(false);
     setActiveAudioSource('');
   };
 
-  // Text-To-Speech Controls using Backend gTTS engine (te-IN / en-US)
-  const speakText = async (text, lang, source) => {
-    handleStopSpeech();
+  // Text-To-Speech Controls using Browser SpeechSynthesis API
+  const speakText = (text, lang, source) => {
     if (!text) return;
+
+    handleStopSpeech();
+
+    const textToSpeak = prepareTTSText(text, 2500);
+    if (!textToSpeak) return;
+
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+      alert("Browser Speech Synthesis is not supported in this browser.");
+      return;
+    }
 
     setIsAudioLoading(true);
     setActiveAudioSource(source);
+    currentAudioLangRef.current = lang;
+
+    const availableVoices = voices.length > 0 ? voices : window.speechSynthesis.getVoices();
+
+    let selectedVoice = null;
+    if (lang === 'telugu') {
+      selectedVoice =
+        availableVoices.find(v => v.lang.toLowerCase() === 'te-in') ||
+        availableVoices.find(v => v.lang.toLowerCase().startsWith('te'));
+
+      if (!selectedVoice) {
+        setIsAudioLoading(false);
+        setActiveAudioSource('');
+        alert("Telugu voice is not available in this browser. Please install Telugu speech support in Windows.");
+        return;
+      }
+    } else {
+      selectedVoice =
+        availableVoices.find(v => v.lang.toLowerCase() === 'en-in') ||
+        availableVoices.find(v => v.lang.toLowerCase() === 'en-us') ||
+        availableVoices.find(v => v.lang.toLowerCase().startsWith('en'));
+    }
+
+    const utterance = new SpeechSynthesisUtterance(textToSpeak);
+    utterance.lang = lang === 'telugu' ? 'te-IN' : 'en-IN';
+    if (selectedVoice) {
+      utterance.voice = selectedVoice;
+    }
+
+    utterance.rate = 0.95;
+    utterance.pitch = 1;
+    utterance.volume = 1;
+
+    utterance.onstart = () => {
+      console.log("BROWSER TTS STARTED");
+      setIsAudioLoading(false);
+      setIsSpeaking(true);
+      setIsPaused(false);
+    };
+
+    utterance.onend = () => {
+      console.log("BROWSER TTS ENDED");
+      handleStopSpeech();
+    };
+
+    utterance.onerror = (event) => {
+      console.error("BROWSER TTS ERROR:", event);
+      handleStopSpeech();
+      alert(
+        lang === 'telugu'
+          ? 'Telugu voice playback failed. Please check your browser/Windows Telugu voice.'
+          : 'English voice playback failed.'
+      );
+    };
 
     try {
-      const res = await api.post(
-        '/api/documents/tts/',
-        { text, language: lang },
-        { responseType: 'blob', timeout: 35000 }
-      );
-
-      // Check if backend returned JSON error inside blob response
-      if (res.data && res.data.type && res.data.type.includes('application/json')) {
-        const textErr = await res.data.text();
-        let jsonErr = {};
-        try { jsonErr = JSON.parse(textErr); } catch (_) {}
-        throw new Error(jsonErr.error || 'Voice synthesis failed on backend.');
-      }
-
-      const audioBlob = new Blob([res.data], { type: 'audio/mpeg' });
-      if (audioBlob.size < 100) {
-        throw new Error('Received empty audio file from TTS server.');
-      }
-
-      const audioUrl = URL.createObjectURL(audioBlob);
-      const audio = new Audio(audioUrl);
-      currentAudioRef.current = audio;
-
-      audio.onplay = () => {
-        setIsAudioLoading(false);
-        setIsSpeaking(true);
-        setIsPaused(false);
-      };
-
-      audio.onended = () => {
-        setIsSpeaking(false);
-        setIsPaused(false);
-        setIsAudioLoading(false);
-        setActiveAudioSource('');
-      };
-
-      audio.onerror = (e) => {
-        console.error("Audio playback error:", e);
-        setIsSpeaking(false);
-        setIsPaused(false);
-        setIsAudioLoading(false);
-        setActiveAudioSource('');
-        alert(lang === 'telugu' ? "Telugu voice audio playback failed. Please check backend connections." : "Voice playback failed.");
-      };
-
-      await audio.play();
+      window.speechSynthesis.speak(utterance);
     } catch (err) {
-      console.error("Backend TTS error:", err);
-      setIsSpeaking(false);
-      setIsPaused(false);
-      setIsAudioLoading(false);
-      setActiveAudioSource('');
-
-      let errMsg = err.message || "Failed to generate voice output.";
-      if (err.response && err.response.data instanceof Blob) {
-        try {
-          const errTxt = await err.response.data.text();
-          const parsed = JSON.parse(errTxt);
-          if (parsed.error) errMsg = parsed.error;
-        } catch (_) {}
-      }
-      alert(lang === 'telugu' ? `Telugu Voice Error: ${errMsg}` : `Voice Error: ${errMsg}`);
+      console.error("SpeechSynthesis error:", err);
+      handleStopSpeech();
+      alert(lang === 'telugu' ? 'Telugu voice could not be played.' : 'English voice could not be played.');
     }
   };
 
   const handlePlayPause = (text, lang, source) => {
-    if (activeAudioSource === source && (isSpeaking || isPaused)) {
-      if (currentAudioRef.current) {
-        if (isPaused) {
-          currentAudioRef.current.play();
-          setIsPaused(false);
-        } else {
-          currentAudioRef.current.pause();
-          setIsPaused(true);
-        }
-      } else {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      if (activeAudioSource === source && currentAudioLangRef.current === lang) {
         if (isPaused) {
           window.speechSynthesis.resume();
           setIsPaused(false);
-        } else {
+          setIsSpeaking(true);
+          return;
+        } else if (isSpeaking) {
           window.speechSynthesis.pause();
           setIsPaused(true);
+          return;
         }
       }
-    } else {
-      speakText(text, lang, source);
     }
+    speakText(text, lang, source);
   };
 
   const handleReplaySpeech = (text, lang, source) => {
@@ -344,8 +390,11 @@ export default function Documents() {
     setSummaryContent('');
 
     try {
-      const res = await api.post(`/api/documents/${activeDoc.id}/summary/`, {}, { timeout: 30000 });
+      const res = await api.post(`/api/documents/${activeDoc.id}/summary/`, {}, { timeout: 35000 });
       setSummaryContent(res.data.summary);
+      if (res.data.diagrams && res.data.diagrams.length > 0) {
+        setActiveDoc(prev => ({ ...prev, extracted_diagrams: res.data.diagrams }));
+      }
     } catch (err) {
       console.error(err);
       if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
@@ -367,8 +416,11 @@ export default function Documents() {
     setActiveLanguage(lang);
 
     try {
-      const res = await api.post(`/api/documents/${activeDoc.id}/explain/`, { language: lang }, { timeout: 30000 });
+      const res = await api.post(`/api/documents/${activeDoc.id}/explain/`, { language: lang }, { timeout: 35000 });
       setExplanation(res.data.response);
+      if (res.data.diagrams && res.data.diagrams.length > 0) {
+        setActiveDoc(prev => ({ ...prev, extracted_diagrams: res.data.diagrams }));
+      }
       speakText(res.data.response, lang, 'explanation');
     } catch (err) {
       console.error(err);
@@ -480,12 +532,14 @@ export default function Documents() {
     <div className="space-y-8 max-w-6xl mx-auto pb-20">
       
       {/* Header Banner */}
-      <div>
-        <h1 className="text-2xl font-bold text-slate-100 flex items-center gap-2">
-          <FileText className="w-6 h-6 text-indigo-400" />
-          AI Document Voice Learning Center
-        </h1>
-        <p className="text-xs text-slate-400 font-semibold">Upload engineering course materials to extract slides/text, hear bilingual voice walkthroughs, study simple exam notes, and take active mock quizzes.</p>
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-100 flex items-center gap-2">
+            <FileText className="w-6 h-6 text-indigo-400" />
+            AI Document Voice Learning Center
+          </h1>
+          <p className="text-xs text-slate-400 font-semibold">Upload engineering course materials to extract slides/text, hear bilingual voice walkthroughs, study simple exam notes, and take active mock quizzes.</p>
+        </div>
       </div>
 
       <div className="grid lg:grid-cols-3 gap-8">
@@ -713,6 +767,42 @@ export default function Documents() {
                   <p className="text-[10px] text-rose-400 max-w-xs mx-auto leading-relaxed">
                     {activeDoc.extracted_text || "The file could not be parsed. Make sure it is not scanned or corrupted."}
                   </p>
+                </div>
+              )}
+
+              {/* Detected Diagrams & Figures Section */}
+              {activeDoc.extracted_diagrams && activeDoc.extracted_diagrams.length > 0 && (
+                <div className="glass-card p-6 rounded-3xl border border-indigo-500/20 space-y-4 bg-slate-900/40">
+                  <div className="flex justify-between items-center border-b border-white/5 pb-2.5">
+                    <h3 className="text-xs font-bold text-indigo-300 uppercase tracking-wider flex items-center gap-1.5">
+                      <ImageIcon className="w-4 h-4 text-indigo-400" />
+                      📊 Detected Diagrams & Figures ({activeDoc.extracted_diagrams.length})
+                    </h3>
+                    <span className="text-[10px] text-slate-400 font-mono">Flowcharts, Block Diagrams, Graphs, Tables & Figures</span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {activeDoc.extracted_diagrams.map((diag, dIdx) => (
+                      <div
+                        key={diag.id || dIdx}
+                        onClick={() => setPreviewImage(diag)}
+                        className="group relative bg-slate-950/60 border border-white/10 hover:border-indigo-500/50 rounded-2xl p-3 cursor-pointer transition-all duration-200 hover:shadow-lg hover:shadow-indigo-500/10 space-y-2"
+                      >
+                        <div className="relative aspect-video rounded-xl overflow-hidden bg-slate-900 flex items-center justify-center border border-white/5">
+                          <img
+                            src={diag.image_url.startsWith('http') ? diag.image_url : (import.meta.env.VITE_API_URL || 'http://localhost:8000') + diag.image_url}
+                            alt={diag.caption}
+                            className="object-contain w-full h-full group-hover:scale-105 transition-transform duration-300"
+                            onError={(e) => { e.target.style.display = 'none'; }}
+                          />
+                          <div className="absolute top-2 left-2 px-2 py-0.5 rounded-md bg-indigo-600/80 backdrop-blur-md text-[9px] font-bold text-white uppercase tracking-wider">
+                            Page {diag.page_number}
+                          </div>
+                        </div>
+                        <p className="text-[11px] font-bold text-slate-300 truncate">{diag.caption || `Page ${diag.page_number} Diagram`}</p>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
 
@@ -1068,6 +1158,36 @@ export default function Documents() {
 
       </div>
 
+      {/* Image Lightbox Modal */}
+      {previewImage && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 animate-fadeIn" onClick={() => setPreviewImage(null)}>
+          <div className="relative max-w-4xl w-full bg-slate-900 border border-white/10 rounded-3xl p-6 space-y-4 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <div className="flex justify-between items-center border-b border-white/10 pb-3">
+              <div>
+                <h3 className="text-sm font-bold text-slate-100">{previewImage.caption || `Diagram - Page ${previewImage.page_number}`}</h3>
+                <span className="text-[10px] text-indigo-400 font-mono">PDF Page {previewImage.page_number} Visual Figure</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPreviewImage(null)}
+                className="p-2 hover:bg-white/10 rounded-xl text-slate-400 hover:text-white cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="max-h-[70vh] flex items-center justify-center bg-slate-950/60 rounded-2xl p-4 overflow-auto border border-white/5">
+              <img
+                src={previewImage.image_url.startsWith('http') ? previewImage.image_url : (import.meta.env.VITE_API_URL || 'http://localhost:8000') + previewImage.image_url}
+                alt={previewImage.caption}
+                className="max-h-[65vh] object-contain rounded-xl"
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
+

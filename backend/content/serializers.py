@@ -148,7 +148,8 @@ class DocumentSerializer(serializers.ModelSerializer):
         model = Document
         fields = (
             'id', 'user', 'file', 'original_filename', 'file_type', 
-            'file_size', 'uploaded_at', 'processing_status', 'extracted_text'
+            'file_size', 'uploaded_at', 'processing_status', 'extracted_text',
+            'extracted_diagrams'
         )
-        read_only_fields = ('id', 'user', 'uploaded_at', 'processing_status', 'extracted_text')
+        read_only_fields = ('id', 'user', 'uploaded_at', 'processing_status', 'extracted_text', 'extracted_diagrams')
 

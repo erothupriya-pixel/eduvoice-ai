@@ -100,7 +100,6 @@ export default function DoubtSessionView({ activeDocument, onClose }) {
       currentAudioRef.current.pause();
       currentAudioRef.current = null;
     }
-    window.speechSynthesis.cancel();
     setPlayingMsgId(null);
     setIsPaused(false);
     setAudioLoadingMsgId(null);
@@ -381,6 +380,24 @@ export default function DoubtSessionView({ activeDocument, onClose }) {
                   <p className="whitespace-pre-wrap font-mono text-[11px] leading-relaxed">
                     {msg.text_content}
                   </p>
+
+                  {/* RAG Diagram attachments if present */}
+                  {!isStudent && msg.diagrams && msg.diagrams.length > 0 && (
+                    <div className="pt-2 flex flex-wrap gap-2">
+                      {msg.diagrams.map((diag, dIdx) => (
+                        <div key={dIdx} className="bg-slate-950/80 border border-white/10 rounded-xl p-1.5 space-y-1 max-w-[200px]">
+                          <img
+                            src={diag.image_url.startsWith('http') ? diag.image_url : (import.meta.env.VITE_API_URL || 'http://localhost:8000') + diag.image_url}
+                            alt={diag.caption}
+                            className="w-full h-24 object-contain rounded-lg bg-slate-900"
+                          />
+                          <span className="block text-[9px] text-center text-indigo-300 font-mono font-bold truncate">
+                            Page {diag.page_number} Figure
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
 
                   {/* Voice Button for AI Answers */}
                   {!isStudent && (

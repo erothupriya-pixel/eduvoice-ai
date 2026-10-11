@@ -36,6 +36,12 @@ class RegisterSerializer(serializers.ModelSerializer):
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.username_field == 'email':
+            self.fields['username'] = serializers.CharField(required=False, write_only=True)
+            self.fields['email'] = serializers.CharField(required=False, write_only=True)
+
     @classmethod
     def get_token(cls, user):
         token = super().get_token(user)
@@ -46,6 +52,11 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         return token
 
     def validate(self, attrs):
+        if 'username' in attrs and not attrs.get('email'):
+            attrs['email'] = attrs['username']
+        elif 'email' in attrs and not attrs.get('username'):
+            attrs['username'] = attrs['email']
+
         data = super().validate(attrs)
         # Add extra user info to the JSON response
         data['user'] = UserSerializer(self.user).data

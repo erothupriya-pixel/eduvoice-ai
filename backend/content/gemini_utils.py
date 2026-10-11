@@ -23,6 +23,113 @@ def extract_pdf_text(file_path):
         logger.exception(f"Error extracting PDF text from {file_path}")
     return text.strip()
 
+def extract_pdf_content_and_diagrams(file_path, doc_id):
+    """
+    Extracts text page-by-page and detects/saves diagrams, flowcharts, block diagrams,
+    tables, figures, network diagrams, graphs, charts, circuit diagrams, architecture diagrams,
+    mathematical diagrams, and illustrations across multi-page PDFs.
+    Returns: (extracted_text, diagrams_list)
+    """
+    import pymupdf
+    from PIL import Image
+
+    text_content = ""
+    diagrams = []
+
+    media_dir = os.path.join(settings.MEDIA_ROOT, 'document_diagrams', str(doc_id))
+    os.makedirs(media_dir, exist_ok=True)
+    media_url_base = f"{settings.MEDIA_URL}document_diagrams/{doc_id}/"
+
+    try:
+        doc = pymupdf.open(file_path)
+        for page_idx in range(len(doc)):
+            page_num = page_idx + 1
+            page = doc[page_idx]
+
+            page_text = page.get_text().strip()
+            if page_text:
+                text_content += f"\n--- Page {page_num} ---\n" + page_text + "\n"
+
+            # 1. Detect embedded images
+            image_list = page.get_images(full=True)
+            saved_images_count = 0
+
+            for img_idx, img_info in enumerate(image_list, start=1):
+                try:
+                    xref = img_info[0]
+                    base_image = doc.extract_image(xref)
+                    if not base_image:
+                        continue
+
+                    img_bytes = base_image["image"]
+                    img_ext = base_image["ext"]
+                    width = base_image.get("width", 0)
+                    height = base_image.get("height", 0)
+
+                    # Filter out tiny icon decorations (less than 60x60 pixels)
+                    if width >= 60 and height >= 60:
+                        img_filename = f"page_{page_num}_diag_{img_idx}.{img_ext}"
+                        abs_img_path = os.path.join(media_dir, img_filename)
+
+                        with open(abs_img_path, "wb") as f:
+                            f.write(img_bytes)
+
+                        rel_media_path = f"document_diagrams/{doc_id}/{img_filename}"
+                        img_url = f"{media_url_base}{img_filename}"
+
+                        diagrams.append({
+                            "id": f"diag-p{page_num}-{img_idx}",
+                            "page_number": page_num,
+                            "image_url": img_url,
+                            "image_path": abs_img_path,
+                            "relative_path": rel_media_path,
+                            "caption": f"Page {page_num} Figure / Diagram {img_idx}",
+                            "page_context": page_text[:500]
+                        })
+                        saved_images_count += 1
+                        if saved_images_count >= 5:
+                            break
+                except Exception as img_err:
+                    logger.warning(f"Error extracting image {img_idx} from page {page_num}: {img_err}")
+
+            # 2. Check for vector drawings (flowcharts, tables, graphs, charts, block diagrams)
+            drawings = page.get_drawings()
+            has_visual_keywords = any(kw in page_text.lower() for kw in [
+                'figure', 'fig', 'diagram', 'flowchart', 'block diagram', 'table', 'chart',
+                'graph', 'architecture', 'circuit', 'illustration', 'model'
+            ])
+
+            if len(drawings) >= 10 or (has_visual_keywords and saved_images_count == 0):
+                try:
+                    pix = page.get_pixmap(dpi=150)
+                    img_filename = f"page_{page_num}_render.png"
+                    abs_img_path = os.path.join(media_dir, img_filename)
+                    pix.save(abs_img_path)
+
+                    rel_media_path = f"document_diagrams/{doc_id}/{img_filename}"
+                    img_url = f"{media_url_base}{img_filename}"
+
+                    diagrams.append({
+                        "id": f"diag-p{page_num}-render",
+                        "page_number": page_num,
+                        "image_url": img_url,
+                        "image_path": abs_img_path,
+                        "relative_path": rel_media_path,
+                        "caption": f"Page {page_num} Visual Page / Diagram",
+                        "page_context": page_text[:500]
+                    })
+                except Exception as render_err:
+                    logger.warning(f"Error rendering page {page_num} pixmap: {render_err}")
+
+        doc.close()
+
+    except Exception as e:
+        logger.exception(f"Error extracting PDF content and diagrams from {file_path}")
+        if not text_content:
+            text_content = extract_pdf_text(file_path)
+
+    return text_content.strip(), diagrams
+
 def extract_docx_text(file_path):
     text = ""
     try:
@@ -359,11 +466,68 @@ def chat_with_document_context(question, doc_context, history=None):
         return f"Apologies, I encountered an issue parsing that query: {str(e)}"
 
 
-def answer_doubt_with_rag(question, document_text=None, history=None, language='english'):
+def call_gemini_multimodal(prompt_prefix, full_text, diagrams=None, prompt_suffix="", max_chunk_size=90000):
+    """
+    Submits text and diagram images to Gemini for multimodal visual understanding & analysis.
+    Supports up to 10 visual diagram images per request.
+    """
+    from PIL import Image
+    configure_gemini()
+    model = genai.GenerativeModel("gemini-3.5-flash-lite")
+
+    image_inputs = []
+    if diagrams and isinstance(diagrams, list):
+        for diag in diagrams[:10]:
+            img_path = diag.get('image_path')
+            if img_path and os.path.exists(img_path):
+                try:
+                    pil_img = Image.open(img_path)
+                    image_inputs.append(pil_img)
+                except Exception as img_err:
+                    logger.warning(f"Could not load image from {img_path}: {img_err}")
+
+    diagram_instruction = (
+        "\nIMPORTANT MANDATORY REQUIREMENTS FOR DIAGRAMS & VISUAL CONTENT:\n"
+        "1. The document contains visual diagrams, figures, flowcharts, block diagrams, tables, graphs, charts, or illustrations.\n"
+        "2. You MUST include a dedicated section titled '### 📊 Diagrams & Visuals' in your response.\n"
+        "3. For EVERY important diagram/figure found, explain:\n"
+        "   - Diagram/Figure name & page number\n"
+        "   - What the diagram represents\n"
+        "   - Main components shown and what each component does\n"
+        "   - How the components are connected / flow or process shown\n"
+        "   - Important labels, values, or numbers\n"
+        "   - Why the diagram is important to the overall topic\n"
+        "4. Do NOT invent or hallucinate information that is not visible in the visual diagram.\n"
+        "5. If a diagram or text in a visual is blurry or cannot be clearly read, explicitly state:\n"
+        "   'This diagram is present in the PDF, but some parts are not clear enough to interpret accurately.'\n"
+        "6. Connect the text explanation with the visual explanation where relevant.\n"
+    )
+
+    full_prompt = f"{prompt_prefix}\n{diagram_instruction}\nDocument Text Context:\n{full_text[:max_chunk_size]}\n\n{prompt_suffix}"
+
+    try:
+        if image_inputs:
+            contents = image_inputs + [full_prompt]
+            response = model.generate_content(contents)
+        else:
+            response = model.generate_content(full_prompt)
+
+        return response.text.strip()
+    except Exception as e:
+        logger.exception("Multimodal call to Gemini failed, retrying with text only...")
+        try:
+            response = model.generate_content(full_prompt)
+            return response.text.strip()
+        except Exception as text_err:
+            return f"Gemini API error: {str(text_err)}"
+
+
+def answer_doubt_with_rag(question, document_text=None, history=None, language='english', diagrams=None):
     """
     Answers a student's doubt using document RAG chunk retrieval, Gemini generation,
-    and simple spoken Telugu/English prompts. Maintains conversation history context.
+    and simple spoken Telugu/English prompts. Includes diagram visual context where relevant.
     """
+    from PIL import Image
     configure_gemini()
     try:
         model = genai.GenerativeModel("gemini-3.5-flash-lite")
@@ -382,6 +546,28 @@ def answer_doubt_with_rag(question, document_text=None, history=None, language='
 
         lang_str = str(language).lower().strip()
         is_telugu = lang_str in ['telugu', 'te', 'te-in', 'te_in'] or lang_str.startswith('te')
+
+        # Collect relevant diagram images if available
+        image_inputs = []
+        retrieved_diagrams = []
+        if diagrams and isinstance(diagrams, list):
+            for diag in diagrams[:3]:
+                img_path = diag.get('image_path')
+                if img_path and os.path.exists(img_path):
+                    try:
+                        pil_img = Image.open(img_path)
+                        image_inputs.append(pil_img)
+                        retrieved_diagrams.append(diag)
+                    except Exception as err:
+                        logger.warning(f"Error loading RAG diagram image: {err}")
+
+        diagram_note = ""
+        if image_inputs:
+            diagram_note = (
+                f"\n[Visual Context: {len(image_inputs)} diagram(s)/figure(s) from the document are attached to this prompt. "
+                "Examine the diagram visual structure (flowchart, block diagram, table, graph, circuit, etc.), "
+                "explain it simply and clearly, and connect it to the doubt explanation.]\n"
+            )
 
         if is_telugu:
             doc_instruction = ""
@@ -403,6 +589,7 @@ def answer_doubt_with_rag(question, document_text=None, history=None, language='
 
             prompt = (
                 f"{TELUGU_PROMPT_INSTRUCTION}\n"
+                f"{diagram_note}\n"
                 f"{doc_instruction}\n"
                 f"--- CONVERSATION HISTORY ---\n{history_str}\n"
                 f"Student Doubt: {question}\n"
@@ -430,14 +617,20 @@ def answer_doubt_with_rag(question, document_text=None, history=None, language='
                 "Rules:\n"
                 "- Explain clearly, simply, and step-by-step with practical real-world examples.\n"
                 "- If the student asks a follow-up question or says 'I don't understand', explain it in an even simpler, intuitive way.\n"
+                f"{diagram_note}\n"
                 f"{doc_instruction}\n"
                 f"--- CONVERSATION HISTORY ---\n{history_str}\n"
                 f"Student Doubt: {question}\n"
                 f"Lecturer Answer:"
             )
 
-        response = model.generate_content(prompt)
-        return response.text.strip(), context_found, retrieved_context
+        if image_inputs:
+            contents = image_inputs + [prompt]
+            response = model.generate_content(contents)
+        else:
+            response = model.generate_content(prompt)
+
+        return response.text.strip(), context_found, retrieved_context, retrieved_diagrams
 
     except Exception as e:
         logger.exception("Error in answer_doubt_with_rag")
@@ -446,7 +639,7 @@ def answer_doubt_with_rag(question, document_text=None, history=None, language='
             if language == 'telugu' else
             f"Apologies, I encountered an issue processing your doubt: {str(e)}"
         )
-        return err_msg, False, ""
+        return err_msg, False, "", []
 
 
 

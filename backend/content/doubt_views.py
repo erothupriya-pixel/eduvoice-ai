@@ -137,15 +137,17 @@ class DoubtSessionAskView(APIView):
             })
         past_history = past_history[-10:] # keep last 10 messages
 
-        # Get PDF extracted text if document exists
+        # Get PDF extracted text and diagrams if document exists
         doc_text = doc.extracted_text if doc and doc.processing_status == Document.Status.COMPLETED else ""
+        doc_diagrams = doc.extracted_diagrams if doc and doc.processing_status == Document.Status.COMPLETED else []
 
         # Generate answer using RAG
-        answer_text, context_found, retrieved_context = answer_doubt_with_rag(
+        answer_text, context_found, retrieved_context, retrieved_diagrams = answer_doubt_with_rag(
             question=question,
             document_text=doc_text,
             history=past_history,
-            language=language
+            language=language,
+            diagrams=doc_diagrams
         )
 
         # Save AI answer
@@ -173,6 +175,7 @@ class DoubtSessionAskView(APIView):
                 "text_content": ai_msg.text_content,
                 "language": ai_msg.language,
                 "context_found": ai_msg.context_found,
+                "diagrams": retrieved_diagrams,
                 "created_at": ai_msg.created_at
             }
         }, status=status.HTTP_201_CREATED)

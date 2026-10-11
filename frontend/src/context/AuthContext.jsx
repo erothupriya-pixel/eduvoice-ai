@@ -28,7 +28,9 @@ export const AuthProvider = ({ children }) => {
   const login = async (email, password) => {
     setLoading(true);
     try {
+      console.log(`[AUTH] Posting login credentials to ${api.defaults.baseURL}/api/auth/token/`);
       const response = await api.post('/api/auth/token/', { email, password });
+      console.log(`[AUTH] Login success: HTTP ${response.status}`);
       const { access, refresh, user: userData } = response.data;
       
       localStorage.setItem('access_token', access);
@@ -36,9 +38,15 @@ export const AuthProvider = ({ children }) => {
       localStorage.setItem('user', JSON.stringify(userData));
       
       setUser(userData);
-      return { success: true };
+      return { success: true, user: userData };
     } catch (error) {
-      console.error('Login error:', error);
+      console.error('[AUTH] Login error:', {
+        message: error.message,
+        url: error.config?.url,
+        baseURL: error.config?.baseURL,
+        status: error.response?.status,
+        data: error.response?.data
+      });
       let errorMsg = 'Invalid email or password.';
       if (error.response?.data) {
         const data = error.response.data;
@@ -51,7 +59,7 @@ export const AuthProvider = ({ children }) => {
           if (msgs.length > 0) errorMsg = msgs.join(' | ');
         }
       } else if (error.message) {
-        errorMsg = `Network Error: ${error.message}`;
+        errorMsg = `Connection Error (${api.defaults.baseURL}): ${error.message}`;
       }
       return {
         success: false,
@@ -65,10 +73,18 @@ export const AuthProvider = ({ children }) => {
   const register = async (username, email, password, role) => {
     setLoading(true);
     try {
-      await api.post('/api/auth/register/', { username, email, password, role });
+      console.log(`[AUTH] Posting register request to ${api.defaults.baseURL}/api/auth/register/`);
+      const response = await api.post('/api/auth/register/', { username, email, password, role });
+      console.log(`[AUTH] Registration success: HTTP ${response.status}`);
       return { success: true };
     } catch (error) {
-      console.error('Registration error:', error);
+      console.error('[AUTH] Registration error:', {
+        message: error.message,
+        url: error.config?.url,
+        baseURL: error.config?.baseURL,
+        status: error.response?.status,
+        data: error.response?.data
+      });
       const errors = error.response?.data;
       let errorMsg = 'Failed to register.';
       if (errors) {
@@ -87,7 +103,7 @@ export const AuthProvider = ({ children }) => {
           }
         }
       } else if (error.message) {
-        errorMsg = `Network Error: ${error.message}`;
+        errorMsg = `Connection Error (${api.defaults.baseURL}): ${error.message}`;
       }
       return { success: false, error: errorMsg };
     } finally {

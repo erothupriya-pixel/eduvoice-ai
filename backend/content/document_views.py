@@ -13,9 +13,11 @@ from .models import Document
 from .serializers import DocumentSerializer
 from .gemini_utils import (
     extract_pdf_text,
+    extract_pdf_content_and_diagrams,
     extract_docx_text,
     extract_pptx_text,
     configure_gemini,
+    call_gemini_multimodal,
     TELUGU_PROMPT_INSTRUCTION
 )
 
@@ -75,8 +77,9 @@ def process_document_text_extraction(doc_id):
         ext = os.path.splitext(doc.original_filename)[1].lower()
         
         extracted = ""
+        diagrams = []
         if ext == '.pdf':
-            extracted = extract_pdf_text(file_path)
+            extracted, diagrams = extract_pdf_content_and_diagrams(file_path, doc.id)
             doc.file_type = 'PDF'
         elif ext in ['.docx', '.doc']:
             extracted = extract_docx_text(file_path)
@@ -92,15 +95,18 @@ def process_document_text_extraction(doc_id):
         has_letters = any(c.isalpha() for c in cleaned_text)
         
         if not cleaned_text or not has_letters:
-            raise ValueError(
-                "This PDF appears to be scanned. Text extraction is not available for this document."
-            )
+            # If text is empty/scanned but diagrams exist, keep status completed
+            if not diagrams:
+                raise ValueError(
+                    "This PDF appears to be scanned. Text extraction is not available for this document."
+                )
 
-        # Store extracted text (limit to first 150,000 characters to protect context bounds)
+        # Store extracted text and extracted diagrams
         doc.extracted_text = cleaned_text[:150000]
+        doc.extracted_diagrams = diagrams
         doc.processing_status = Document.Status.COMPLETED
         doc.save()
-        logger.info(f"Successfully processed document text extraction: {doc.original_filename}")
+        logger.info(f"Successfully processed document text & diagrams extraction: {doc.original_filename} ({len(diagrams)} diagrams)")
         
     except Exception as e:
         logger.exception(f"Error processing document text extraction for ID {doc_id}")
@@ -209,8 +215,14 @@ class DocumentAIExplainView(APIView):
             )
 
         try:
-            result = call_gemini_with_large_context(prefix, doc.extracted_text)
-            return Response({"response": result}, status=status.HTTP_200_OK)
+            if doc.extracted_diagrams:
+                result = call_gemini_multimodal(prefix, doc.extracted_text, diagrams=doc.extracted_diagrams)
+            else:
+                result = call_gemini_with_large_context(prefix, doc.extracted_text)
+            return Response({
+                "response": result,
+                "diagrams": doc.extracted_diagrams
+            }, status=status.HTTP_200_OK)
         except Exception as e:
             logger.exception("Document AI Explain error")
             return Response({"error": f"Gemini API failure: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -262,18 +274,25 @@ class DocumentAISummaryView(APIView):
             )
 
         prefix = (
-            "Analyze the following document context and generate a complete, professional learning summary.\n"
+            "Analyze the following document context (TEXT + VISUAL DIAGRAMS/FIGURES) and generate a complete, professional learning summary.\n"
             "Include:\n"
             "- A detailed overview of all main topics and chapters\n"
             "- Core engineering concepts and definitions\n"
             "- Important points and equations\n"
+            "- A dedicated section '### 📊 Diagrams & Visuals' analyzing all diagrams, flowcharts, block diagrams, tables, figures, and charts\n"
             "- A brief short-revision summary at the end\n"
             "Format the output nicely using Markdown headers, bold styling, and bullet points."
         )
 
         try:
-            result = call_gemini_with_large_context(prefix, doc.extracted_text)
-            return Response({"summary": result}, status=status.HTTP_200_OK)
+            if doc.extracted_diagrams:
+                result = call_gemini_multimodal(prefix, doc.extracted_text, diagrams=doc.extracted_diagrams)
+            else:
+                result = call_gemini_with_large_context(prefix, doc.extracted_text)
+            return Response({
+                "summary": result,
+                "diagrams": doc.extracted_diagrams
+            }, status=status.HTTP_200_OK)
         except Exception as e:
             logger.exception("Document AI Summary error")
             return Response({"error": f"Gemini API failure: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -475,11 +494,15 @@ class DocumentAIAnalyzeView(APIView):
             )
 
         try:
-            result = call_gemini_with_large_context(prefix, doc.extracted_text)
+            if doc.extracted_diagrams:
+                result = call_gemini_multimodal(prefix, doc.extracted_text, diagrams=doc.extracted_diagrams)
+            else:
+                result = call_gemini_with_large_context(prefix, doc.extracted_text)
             return Response({
                 "document_id": str(doc.id),
                 "language": language,
-                "explanation": result
+                "explanation": result,
+                "diagrams": doc.extracted_diagrams
             }, status=status.HTTP_200_OK)
         except Exception as e:
             logger.exception("Document AI Analyze error")

@@ -85,7 +85,8 @@ DB_HOST = os.getenv('DB_HOST')
 DB_PORT = os.getenv('DB_PORT', '5432')
 
 # Toggle SQLite fallback if postgres parameters are default or missing
-if DB_HOST == '127.0.0.1' and DB_USER == 'postgres' and DB_PASSWORD == 'postgres' and os.getenv('USE_SQLITE', 'True').lower() == 'true':
+use_sqlite = os.getenv('USE_SQLITE', 'True').lower() in ('true', '1', 't')
+if use_sqlite or not DB_HOST or (DB_HOST == '127.0.0.1' and DB_USER == 'postgres' and DB_PASSWORD == 'postgres'):
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
@@ -161,6 +162,7 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
     ),
+    'EXCEPTION_HANDLER': 'core.exceptions.custom_exception_handler',
 }
 
 # Simple JWT Configuration
@@ -179,18 +181,18 @@ SIMPLE_JWT = {
 }
 
 # CORS Configuration
-# CORS Configuration
 
 CORS_ALLOWED_ORIGINS = [
     origin.strip() for origin in os.getenv(
         'CORS_ALLOWED_ORIGINS',
-        'https://startling-stardust-d2d0c1.netlify.app,http://localhost:5173,http://127.0.0.1:5173'
+        'https://startling-stardust-d2d0c1.netlify.app,http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000'
     ).split(',')
     if origin.strip()
 ]
 
-
 CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_ALL_ORIGINS = True
 
 # Google Gemini API Config
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
+
